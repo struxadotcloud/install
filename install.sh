@@ -50,7 +50,7 @@ ask_yn() {
   local hint; [[ "$default" == "y" ]] && hint="[Y/n]" || hint="[y/N]"
   while true; do
     echo -en "${BOLD}  ? ${RESET}${prompt} ${DIM}${hint}${RESET} "
-    read -r reply
+    read -r reply </dev/tty
     reply="${reply:-$default}"
     case "${reply,,}" in
       y|yes) return 0 ;;
@@ -67,14 +67,14 @@ ask_input() {
   else
     echo -en "${BOLD}  ? ${RESET}${prompt}: "
   fi
-  read -r result
+  read -r result </dev/tty
   echo "${result:-$default}"
 }
 
 ask_secret() {
   local prompt="$1" result
   echo -en "${BOLD}  ? ${RESET}${prompt} ${DIM}(hidden)${RESET}: "
-  read -rs result
+  read -rs result </dev/tty
   echo ""
   echo "$result"
 }
@@ -89,7 +89,7 @@ ask_select() {
   done
   while true; do
     echo -en "  ${BOLD}→${RESET} Choice: "
-    read -r choice
+    read -r choice </dev/tty
     if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#options[@]} )); then
       echo "$choice"
       return
