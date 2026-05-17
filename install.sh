@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Struxa Installer — sets up Struxa dashboard and optionally Wings node agent
 
+# Redirect stdin from the terminal so interactive prompts work when the script
+# is fetched via curl (curl | bash pipes stdin; bash <(curl) does not).
+exec < /dev/tty
+
 # ── Colors ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -49,23 +53,25 @@ ask_yn() {
   local prompt="$1" default="${2:-y}" reply
   local hint; [[ "$default" == "y" ]] && hint="[Y/n]" || hint="[y/N]"
   while true; do
-    echo -en "${BOLD}  ? ${RESET}${prompt} ${DIM}${hint}${RESET} "
+    echo -en "${BOLD}  ? ${RESET}${prompt} ${DIM}${hint}${RESET} " >/dev/tty
     read -r reply </dev/tty
     reply="${reply:-$default}"
     case "${reply,,}" in
       y|yes) return 0 ;;
       n|no)  return 1 ;;
-      *)     warn "Please answer y or n." ;;
+      *)     echo -e "${YELLOW}  ⚠${RESET} Please answer y or n." >/dev/tty ;;
     esac
   done
 }
 
+# All display in ask_input/ask_secret/ask_select goes to /dev/tty so that
+# calling them inside $() command substitution doesn't swallow the prompts.
 ask_input() {
   local prompt="$1" default="${2:-}" result
   if [[ -n "$default" ]]; then
-    echo -en "${BOLD}  ? ${RESET}${prompt} ${DIM}[${default}]${RESET}: "
+    echo -en "${BOLD}  ? ${RESET}${prompt} ${DIM}[${default}]${RESET}: " >/dev/tty
   else
-    echo -en "${BOLD}  ? ${RESET}${prompt}: "
+    echo -en "${BOLD}  ? ${RESET}${prompt}: " >/dev/tty
   fi
   read -r result </dev/tty
   echo "${result:-$default}"
@@ -73,28 +79,28 @@ ask_input() {
 
 ask_secret() {
   local prompt="$1" result
-  echo -en "${BOLD}  ? ${RESET}${prompt} ${DIM}(hidden)${RESET}: "
+  echo -en "${BOLD}  ? ${RESET}${prompt} ${DIM}(hidden)${RESET}: " >/dev/tty
   read -rs result </dev/tty
-  echo ""
+  echo "" >/dev/tty
   echo "$result"
 }
 
 ask_select() {
   local prompt="$1"; shift
   local options=("$@") choice i=1
-  echo -e "${BOLD}  ? ${RESET}${prompt}"
+  echo -e "${BOLD}  ? ${RESET}${prompt}" >/dev/tty
   for opt in "${options[@]}"; do
-    echo -e "     ${CYAN}[${i}]${RESET} ${opt}"
+    echo -e "     ${CYAN}[${i}]${RESET} ${opt}" >/dev/tty
     (( i++ )) || true
   done
   while true; do
-    echo -en "  ${BOLD}→${RESET} Choice: "
+    echo -en "  ${BOLD}→${RESET} Choice: " >/dev/tty
     read -r choice </dev/tty
     if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#options[@]} )); then
       echo "$choice"
       return
     fi
-    warn "Enter a number between 1 and ${#options[@]}."
+    echo -e "${YELLOW}  ⚠${RESET} Enter a number between 1 and ${#options[@]}." >/dev/tty
   done
 }
 
@@ -400,9 +406,6 @@ pkg_install() {
 STRUXA_DIR="/opt/struxa"
 WINGS_DIR="/opt/wings"
 
-STRUXA_COMPOSE_URL="https://raw.githubusercontent.com/struxadotcloud/struxa/main/docker-compose.prod.yml"
-WINGS_COMPOSE_URL="https://raw.githubusercontent.com/struxadotcloud/wings/main/compose.yml"
-
 show_banner
 require_root
 check_prereqs
@@ -410,21 +413,22 @@ check_prereqs
 # ── Installation mode ────────────────────────────────────────────────────────
 header "Installation Mode"
 INSTALL_MODE=$(ask_select "What would you like to install?" \
-  "Dashboard only  (Struxa panel)" \
-  "Dashboard + Wings  (panel + node agent)")
+  "Dashboard only  (Struxa panel + database)" \
+  "Dashboard + Wings  (panel, database and node agent)")
 
 INSTALL_WINGS=false
 [[ "$INSTALL_MODE" == "2" ]] && INSTALL_WINGS=true
 
-# ── Create install directories & fetch compose files ────────────────────────
+# ── Create install directories & write compose files ────────────────────────
 header "Preparing Install Directories"
 
 step "Creating ${STRUXA_DIR}..."
 mkdir -p "$STRUXA_DIR"
 
 step "Fetching docker-compose.prod.yml..."
-curl -fsSL "$STRUXA_COMPOSE_URL" -o "${STRUXA_DIR}/docker-compose.prod.yml" || {
-  err "Failed to download Struxa compose file from GitHub."
+curl -fsSL "https://raw.githubusercontent.com/struxadotcloud/struxa/master/docker-compose.prod.yml" \
+  -o "${STRUXA_DIR}/docker-compose.prod.yml" || {
+  err "Failed to download Struxa compose file."
   exit 1
 }
 success "Struxa compose file ready"
@@ -434,8 +438,9 @@ if $INSTALL_WINGS; then
   mkdir -p "${WINGS_DIR}/config"
 
   step "Fetching wings compose.yml..."
-  curl -fsSL "$WINGS_COMPOSE_URL" -o "${WINGS_DIR}/compose.yml" || {
-    err "Failed to download Wings compose file from GitHub."
+  curl -fsSL "https://raw.githubusercontent.com/struxadotcloud/wings/master/compose.yml" \
+    -o "${WINGS_DIR}/compose.yml" || {
+    err "Failed to download Wings compose file."
     exit 1
   }
   success "Wings compose file ready"
