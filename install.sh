@@ -397,20 +397,15 @@ pkg_install() {
 #  MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STRUXA_DIR="$(realpath "${SCRIPT_DIR}/../struxa")"
-WINGS_DIR="$(realpath "${SCRIPT_DIR}/../wings")"
+STRUXA_DIR="/opt/struxa"
+WINGS_DIR="/opt/wings"
+
+STRUXA_COMPOSE_URL="https://raw.githubusercontent.com/struxadotcloud/struxa/main/docker-compose.prod.yml"
+WINGS_COMPOSE_URL="https://raw.githubusercontent.com/struxadotcloud/wings/main/compose.yml"
 
 show_banner
 require_root
 check_prereqs
-
-# ── Validate project dirs ────────────────────────────────────────────────────
-if [[ ! -d "$STRUXA_DIR" ]]; then
-  err "Struxa directory not found at: ${STRUXA_DIR}"
-  err "Make sure the struxa project is at the same level as the install directory."
-  exit 1
-fi
 
 # ── Installation mode ────────────────────────────────────────────────────────
 header "Installation Mode"
@@ -421,9 +416,29 @@ INSTALL_MODE=$(ask_select "What would you like to install?" \
 INSTALL_WINGS=false
 [[ "$INSTALL_MODE" == "2" ]] && INSTALL_WINGS=true
 
-if $INSTALL_WINGS && [[ ! -d "$WINGS_DIR" ]]; then
-  err "Wings directory not found at: ${WINGS_DIR}"
+# ── Create install directories & fetch compose files ────────────────────────
+header "Preparing Install Directories"
+
+step "Creating ${STRUXA_DIR}..."
+mkdir -p "$STRUXA_DIR"
+
+step "Fetching docker-compose.prod.yml..."
+curl -fsSL "$STRUXA_COMPOSE_URL" -o "${STRUXA_DIR}/docker-compose.prod.yml" || {
+  err "Failed to download Struxa compose file from GitHub."
   exit 1
+}
+success "Struxa compose file ready"
+
+if $INSTALL_WINGS; then
+  step "Creating ${WINGS_DIR}..."
+  mkdir -p "${WINGS_DIR}/config"
+
+  step "Fetching wings compose.yml..."
+  curl -fsSL "$WINGS_COMPOSE_URL" -o "${WINGS_DIR}/compose.yml" || {
+    err "Failed to download Wings compose file from GitHub."
+    exit 1
+  }
+  success "Wings compose file ready"
 fi
 
 # ── Dashboard configuration ──────────────────────────────────────────────────
