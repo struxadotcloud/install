@@ -409,6 +409,41 @@ pkg_install() {
   fi
 }
 
+# ── Release tag resolution ───────────────────────────────────────────────────
+RESOLVED_TAG=""
+RESOLVED_IMAGE_TAG=""
+
+resolve_release_tag() {
+  local api_base="https://api.github.com/repos/struxadotcloud/struxa"
+
+  if $USE_NIGHTLY; then
+    step "Fetching latest pre-release tag from GitHub..."
+    RESOLVED_TAG=$(curl -fsSL "${api_base}/releases?per_page=20" \
+      -H "Accept: application/vnd.github+json" | \
+      awk '
+        /"tag_name"/ { tag = $0 }
+        /"prerelease": true/ {
+          match(tag, /"tag_name": *"([^"]+)"/, a)
+          if (a[1]) { print a[1]; exit }
+        }
+      ')
+    RESOLVED_IMAGE_TAG="nightly"
+  else
+    step "Fetching latest stable release tag from GitHub..."
+    RESOLVED_TAG=$(curl -fsSL "${api_base}/releases/latest" \
+      -H "Accept: application/vnd.github+json" | \
+      grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+    RESOLVED_IMAGE_TAG="${RESOLVED_TAG#v}"
+  fi
+
+  if [[ -z "$RESOLVED_TAG" ]]; then
+    err "Could not resolve a release tag from GitHub. Check your network connection."
+    exit 1
+  fi
+
+  success "Release: ${BOLD}${RESOLVED_TAG}${RESET}  (image tag: ${RESOLVED_IMAGE_TAG})"
+}
+
 # ── Update existing installation ─────────────────────────────────────────────
 do_update() {
   header "Update Struxa"
@@ -419,15 +454,12 @@ do_update() {
     exit 1
   fi
 
-  local new_tag="latest"
-  $USE_NIGHTLY && new_tag="nightly"
-
   local current_tag
   current_tag=$(grep '^IMAGE_TAG=' "${STRUXA_DIR}/.env.prod" | cut -d= -f2)
 
   blank
   info "Current image tag : ${BOLD}${current_tag}${RESET}"
-  info "Will update to    : ${BOLD}${new_tag}${RESET}"
+  info "Will update to    : ${BOLD}${RESOLVED_IMAGE_TAG}${RESET}  (release: ${RESOLVED_TAG})"
   blank
   warn "This will pull new images and restart all Struxa services."
   blank
@@ -438,13 +470,13 @@ do_update() {
   fi
 
   blank
-  step "Setting IMAGE_TAG=${new_tag}..."
-  sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=${new_tag}/" "${STRUXA_DIR}/.env.prod"
-  success "IMAGE_TAG → ${new_tag}"
+  step "Setting IMAGE_TAG=${RESOLVED_IMAGE_TAG}..."
+  sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=${RESOLVED_IMAGE_TAG}/" "${STRUXA_DIR}/.env.prod"
+  success "IMAGE_TAG → ${RESOLVED_IMAGE_TAG}"
 
-  step "Fetching latest docker-compose.prod.yml..."
-  curl -fsSL "https://raw.githubusercontent.com/struxadotcloud/struxa/master/docker-compose.prod.yml" \
-    -o "${STRUXA_DIR}/docker-compose.prod.yml" || warn "Failed to fetch latest compose file — using existing."
+  step "Fetching docker-compose.prod.yml from ${RESOLVED_TAG}..."
+  curl -fsSL "https://raw.githubusercontent.com/struxadotcloud/struxa/${RESOLVED_TAG}/docker-compose.prod.yml" \
+    -o "${STRUXA_DIR}/docker-compose.prod.yml" || warn "Failed to fetch compose file — using existing."
 
   step "Pulling Struxa images..."
   start_spinner "Pulling images (this may take a few minutes)..."
@@ -504,6 +536,7 @@ WINGS_DIR="/opt/wings"
 show_banner
 require_root
 check_prereqs
+resolve_release_tag
 
 [[ "$MODE" == "update" ]] && do_update
 
@@ -522,8 +555,8 @@ header "Preparing Install Directories"
 step "Creating ${STRUXA_DIR}..."
 mkdir -p "$STRUXA_DIR"
 
-step "Fetching docker-compose.prod.yml..."
-curl -fsSL "https://raw.githubusercontent.com/struxadotcloud/struxa/master/docker-compose.prod.yml" \
+step "Fetching docker-compose.prod.yml (${RESOLVED_TAG})..."
+curl -fsSL "https://raw.githubusercontent.com/struxadotcloud/struxa/${RESOLVED_TAG}/docker-compose.prod.yml" \
   -o "${STRUXA_DIR}/docker-compose.prod.yml" || {
   err "Failed to download Struxa compose file."
   exit 1
@@ -570,8 +603,7 @@ if ask_yn "Configure Cloudflare Turnstile CAPTCHA?" "n"; then
 fi
 
 DATABASE_URL="mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE}"
-IMAGE_TAG="latest"
-$USE_NIGHTLY && IMAGE_TAG="nightly"
+IMAGE_TAG="$RESOLVED_IMAGE_TAG"
 
 success "Dashboard configuration ready"
 
