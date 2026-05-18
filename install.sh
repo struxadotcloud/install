@@ -475,7 +475,7 @@ do_update() {
   success "IMAGE_TAG → ${RESOLVED_IMAGE_TAG}"
 
   step "Fetching docker-compose.prod.yml from ${RESOLVED_TAG}..."
-  curl -fsSL "https://raw.githubusercontent.com/struxadotcloud/struxa/${RESOLVED_TAG}/docker-compose.prod.yml" \
+  curl -fsSL "https://raw.githubusercontent.com/struxadotcloud/struxa/refs/tags/${RESOLVED_TAG}/docker-compose.prod.yml" \
     -o "${STRUXA_DIR}/docker-compose.prod.yml" || warn "Failed to fetch compose file — using existing."
 
   step "Pulling Struxa images..."
@@ -556,7 +556,7 @@ step "Creating ${STRUXA_DIR}..."
 mkdir -p "$STRUXA_DIR"
 
 step "Fetching docker-compose.prod.yml (${RESOLVED_TAG})..."
-curl -fsSL "https://raw.githubusercontent.com/struxadotcloud/struxa/${RESOLVED_TAG}/docker-compose.prod.yml" \
+curl -fsSL "https://raw.githubusercontent.com/struxadotcloud/struxa/refs/tags/${RESOLVED_TAG}/docker-compose.prod.yml" \
   -o "${STRUXA_DIR}/docker-compose.prod.yml" || {
   err "Failed to download Struxa compose file."
   exit 1
