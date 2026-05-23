@@ -474,6 +474,22 @@ do_update() {
   sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=${RESOLVED_IMAGE_TAG}/" "${STRUXA_DIR}/.env.prod"
   success "IMAGE_TAG → ${RESOLVED_IMAGE_TAG}"
 
+  step "Checking for new required variables..."
+  if ! grep -q '^MINIO_ACCESS_KEY=' "${STRUXA_DIR}/.env.prod"; then
+    warn "MinIO variables not found in .env.prod — generating and appending them now."
+    local new_minio_access new_minio_secret
+    new_minio_access=$(generate_secret)
+    new_minio_secret=$(generate_secret)
+    cat >> "${STRUXA_DIR}/.env.prod" << MINIO_VARS
+
+MINIO_ENDPOINT=http://minio:9000
+MINIO_ACCESS_KEY=${new_minio_access}
+MINIO_SECRET_KEY=${new_minio_secret}
+MINIO_BUCKET=struxa
+MINIO_VARS
+    success "MinIO variables appended to .env.prod"
+  fi
+
   step "Fetching docker-compose.prod.yml from ${RESOLVED_TAG}..."
   curl -fsSL "https://raw.githubusercontent.com/struxadotcloud/struxa/refs/tags/${RESOLVED_TAG}/docker-compose.prod.yml" \
     -o "${STRUXA_DIR}/docker-compose.prod.yml" || warn "Failed to fetch compose file — using existing."
@@ -590,6 +606,8 @@ MYSQL_USER="struxa"
 MYSQL_PASSWORD=$(generate_secret)
 BETTER_AUTH_SECRET=$(generate_secret)
 DATABASE_ENCRYPTION_KEY=$(generate_hex64)
+MINIO_ACCESS_KEY=$(generate_secret)
+MINIO_SECRET_KEY=$(generate_secret)
 
 step "Generating RSA key pair for JWT signing..."
 generate_rsa_keypair
@@ -707,6 +725,11 @@ JWT_PUBLIC_KEY=${JWT_PUBLIC_KEY}
 DATABASE_ENCRYPTION_KEY=${DATABASE_ENCRYPTION_KEY}
 
 TURNSTILE_SECRET_KEY=${TURNSTILE_SECRET_KEY}
+
+MINIO_ENDPOINT=http://minio:9000
+MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+MINIO_BUCKET=struxa
 ENVFILE
 
 chmod 600 "${STRUXA_DIR}/.env.prod"
