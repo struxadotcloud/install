@@ -17,8 +17,6 @@ Interactive setup with reverse proxy, SSL, and full configuration — no manual 
 
 <br />
 
-## What does it do?
-
 The installer sets up a full Struxa deployment on a fresh Linux server in a single command. It handles:
 
 - Installing the **Struxa panel** (dashboard + database + watchkeeper via Docker Compose)
@@ -35,6 +33,7 @@ The installer sets up a full Struxa deployment on a fresh Linux server in a sing
 | [struxadotcloud/struxa](https://github.com/struxadotcloud/struxa) | Main panel — web UI, API, database |
 | [struxadotcloud/wings](https://github.com/struxadotcloud/wings) | Node agent — server lifecycle, SFTP, backups |
 | [struxadotcloud/install](https://github.com/struxadotcloud/install) | This repo — installer script |
+| [struxadotcloud/docs](https://github.com/struxadotcloud/docs) | Documentation site |
 
 ## Usage
 
@@ -83,5 +82,5 @@ Once the installer completes, Wings will be running but **not yet connected** to
 <br />
 
 <div align="center">
-  <sub>Struxa is not affiliated with Pterodactyl or any game server hosting provider.</sub>
+  <sub>Part of the Struxa project.</sub>
 </div>
