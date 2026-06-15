@@ -82,5 +82,5 @@ Once the installer completes, Wings will be running but **not yet connected** to
 <br />
 
 <div align="center">
-  <sub>Part of the Struxa project.</sub>
+  <sub>Copyright (c) The Hosting Company Ltd</sub>
 </div>
