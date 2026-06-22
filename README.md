@@ -82,5 +82,5 @@ Once the installer completes, Wings will be running but **not yet connected** to
 <br />
 
 <div align="center">
-  <sub>Copyright (c) The Hosting Company Ltd</sub>
+  <sub>Copyright (c) Disaster Limited</sub>
 </div>
