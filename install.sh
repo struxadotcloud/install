@@ -634,7 +634,7 @@ WINGS_GID="988"
 if $INSTALL_WINGS; then
   header "Wings Configuration"
   WINGS_DOMAIN=$(ask_input "Wings node domain or IP" "node.example.com")
-  WINGS_TIMEZONE=$(ask_input "Timezone" "UTC")
+  WINGS_TIMEZONE=$(ask_input "Timezone (Europe/Warsaw)" "UTC")
   WINGS_UID=$(ask_input "Wings user UID" "988")
   WINGS_GID=$(ask_input "Wings user GID" "988")
   success "Wings configuration ready"
