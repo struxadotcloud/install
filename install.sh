@@ -37,6 +37,7 @@ show_banner() {
 BANNER
   echo -e "${RESET}${DIM}             Game Server Management Platform${RESET}"
   echo -e "${DIM}                      Installer v1.0${RESET}"
+  echo -e "${DIM}   Sends anonymous install stats. Opt out: --no-telemetry${RESET}"
   blank
 }
 
@@ -44,6 +45,7 @@ BANNER
 require_root() {
   if [[ $EUID -ne 0 ]]; then
     err "This script must be run as root. Try: sudo bash install.sh"
+    send_event "installer_failed" "\"stage\":\"root_check\""
     exit 1
   fi
 }
@@ -154,12 +156,35 @@ trap 'stop_spinner' EXIT
 # ── Argument parsing ─────────────────────────────────────────────────────────
 USE_NIGHTLY=false
 MODE="install"
+NO_TELEMETRY=false
 for arg in "$@"; do
   case "$arg" in
-    --nightly) USE_NIGHTLY=true ;;
-    update)    MODE="update" ;;
+    --nightly)      USE_NIGHTLY=true ;;
+    --no-telemetry) NO_TELEMETRY=true ;;
+    update)         MODE="update" ;;
   esac
 done
+[[ -n "${DO_NOT_TRACK:-}" ]] && NO_TELEMETRY=true
+[[ -n "${STRUXA_NO_TELEMETRY:-}" ]] && NO_TELEMETRY=true
+
+# ── Telemetry ─────────────────────────────────────────────────────────────────
+# Anonymous install analytics (event name + OS/arch/mode, no domains or secrets).
+# Opt out with --no-telemetry, STRUXA_NO_TELEMETRY=1, or DO_NOT_TRACK=1.
+STRUXA_DISTINCT_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
+POSTHOG_HOST="https://eu.i.posthog.com"
+POSTHOG_KEY="phc_wJVWqWPQjfae28vTDvyoU4rxm5HcrQVxzsSkooL6REsM"
+CURRENT_STAGE="start"
+
+# $1 = event name, $2 = extra JSON properties, e.g. '"mode":"install"'
+# Fire-and-forget: backgrounded with a short timeout so a slow/unreachable
+# PostHog never delays or breaks the install.
+send_event() {
+  $NO_TELEMETRY && return 0
+  curl -fsSL --max-time 3 -X POST "$POSTHOG_HOST/capture/" \
+    -H "Content-Type: application/json" \
+    -d "{\"api_key\":\"$POSTHOG_KEY\",\"event\":\"$1\",\"distinct_id\":\"$STRUXA_DISTINCT_ID\",\"properties\":{$2,\"\$ip\":null,\"os\":\"$(uname -s)\",\"arch\":\"$(uname -m)\"}}" \
+    >/dev/null 2>&1 &
+}
 
 # ── Prerequisites ────────────────────────────────────────────────────────────
 check_prereqs() {
@@ -179,6 +204,7 @@ check_prereqs() {
         success "Docker installed"
       else
         err "Docker installation failed. Install it manually and re-run."
+        send_event "installer_failed" "\"stage\":\"prereqs_docker\""
         exit 1
       fi
     else
@@ -214,6 +240,7 @@ check_prereqs() {
     blank
     err "Missing: ${missing[*]}"
     err "Install them and re-run this script."
+    send_event "installer_failed" "\"stage\":\"prereqs_missing\""
     exit 1
   fi
 
@@ -438,6 +465,7 @@ resolve_release_tag() {
 
   if [[ -z "$RESOLVED_TAG" ]]; then
     err "Could not resolve a release tag from GitHub. Check your network connection."
+    send_event "installer_failed" "\"stage\":\"release_tag\""
     exit 1
   fi
 
@@ -447,10 +475,12 @@ resolve_release_tag() {
 # ── Update existing installation ─────────────────────────────────────────────
 do_update() {
   header "Update Struxa"
+  send_event "installer_update_started" "\"channel\":\"$([[ $USE_NIGHTLY == true ]] && echo nightly || echo stable)\""
 
   if [[ ! -f "${STRUXA_DIR}/.env.prod" ]]; then
     err "No existing installation found at ${STRUXA_DIR}/.env.prod"
     err "Run the installer without the update option first."
+    send_event "installer_failed" "\"stage\":\"update_not_found\""
     exit 1
   fi
 
@@ -498,7 +528,8 @@ MINIO_VARS
   start_spinner "Pulling images (this may take a few minutes)..."
   cd "$STRUXA_DIR"
   docker compose -f docker-compose.prod.yml --env-file .env.prod pull > /dev/null 2>&1 || {
-    stop_spinner; err "Failed to pull images. Check your network connection."; exit 1
+    stop_spinner; err "Failed to pull images. Check your network connection."
+    send_event "installer_failed" "\"stage\":\"update_pull\""; exit 1
   }
   stop_spinner
   success "Images pulled"
@@ -506,7 +537,8 @@ MINIO_VARS
   step "Restarting Struxa services..."
   start_spinner "Restarting services..."
   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d > /dev/null 2>&1 || {
-    stop_spinner; err "Failed to restart Struxa services."; exit 1
+    stop_spinner; err "Failed to restart Struxa services."
+    send_event "installer_failed" "\"stage\":\"update_restart\""; exit 1
   }
   stop_spinner
   success "Struxa services updated and restarted"
@@ -539,6 +571,7 @@ MINIO_VARS
 
   blank
   success "Update complete"
+  send_event "installer_update_completed" ""
   exit 0
 }
 
@@ -550,6 +583,7 @@ STRUXA_DIR="/opt/struxa"
 WINGS_DIR="/opt/wings"
 
 show_banner
+send_event "installer_started" "\"action\":\"$MODE\",\"channel\":\"$([[ $USE_NIGHTLY == true ]] && echo nightly || echo stable)\""
 require_root
 check_prereqs
 resolve_release_tag
@@ -575,6 +609,7 @@ step "Fetching docker-compose.prod.yml (${RESOLVED_TAG})..."
 curl -fsSL "https://raw.githubusercontent.com/struxadotcloud/struxa/refs/tags/${RESOLVED_TAG}/docker-compose.prod.yml" \
   -o "${STRUXA_DIR}/docker-compose.prod.yml" || {
   err "Failed to download Struxa compose file."
+  send_event "installer_failed" "\"stage\":\"download_struxa_compose\""
   exit 1
 }
 success "Struxa compose file ready"
@@ -587,6 +622,7 @@ if $INSTALL_WINGS; then
   curl -fsSL "https://raw.githubusercontent.com/struxadotcloud/wings/master/compose.yml" \
     -o "${WINGS_DIR}/compose.yml" || {
     err "Failed to download Wings compose file."
+    send_event "installer_failed" "\"stage\":\"download_wings_compose\""
     exit 1
   }
   success "Wings compose file ready"
@@ -1120,7 +1156,8 @@ step "Pulling Struxa images..."
 start_spinner "Pulling images (this may take a few minutes)..."
 cd "$STRUXA_DIR"
 docker compose -f docker-compose.prod.yml --env-file .env.prod pull > /dev/null 2>&1 || {
-  stop_spinner; err "Failed to pull Struxa images. Check your network and image tag."; exit 1
+  stop_spinner; err "Failed to pull Struxa images. Check your network and image tag."
+  send_event "installer_failed" "\"stage\":\"start_pull\""; exit 1
 }
 stop_spinner
 success "Images pulled"
@@ -1136,6 +1173,7 @@ if ! docker compose -f docker-compose.prod.yml --env-file .env.prod up -d > "$UP
   echo "---- docker compose ps ----" >&2
   docker compose -f docker-compose.prod.yml --env-file .env.prod ps >&2
   rm -f "$UP_LOG"
+  send_event "installer_failed" "\"stage\":\"start_up\""
   exit 1
 fi
 rm -f "$UP_LOG"
@@ -1154,6 +1192,8 @@ if $INSTALL_WINGS; then
 fi
 
 cd "$SCRIPT_DIR"
+
+send_event "installer_completed" "\"mode\":\"$([[ $INSTALL_WINGS == true ]] && echo dashboard_wings || echo dashboard_only)\",\"webserver\":\"$WEBSERVER\",\"ssl\":\"$SSL_MODE\""
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 blank
