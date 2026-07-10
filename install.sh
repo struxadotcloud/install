@@ -594,9 +594,17 @@ STRUXA_DIR="/opt/struxa"
 WINGS_DIR="/opt/wings"
 
 # ── Logging ──────────────────────────────────────────────────────────────────
-# Mirrors everything printed from here on into a log file for debugging.
-LOG_FILE="/var/log/struxa-install.log"
-mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || LOG_FILE="/tmp/struxa-install.log"
+# Mirrors everything printed from here on into a timestamped log file, one
+# per run, for debugging. Keeps only the LOG_KEEP most recent runs.
+LOG_DIR="/var/log/struxa-install"
+LOG_KEEP=10
+mkdir -p "$LOG_DIR" 2>/dev/null || LOG_DIR="/tmp/struxa-install"
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+LOG_FILE="${LOG_DIR}/$(date -u +"%Y%m%dT%H%M%SZ").log"
+
+# shellcheck disable=SC2012
+ls -1t "${LOG_DIR}"/*.log 2>/dev/null | tail -n "+$((LOG_KEEP + 1))" | xargs -r rm -f
+
 {
   echo "════════════════════════════════════════════════════════════"
   echo "Struxa installer run: $(date -u +"%Y-%m-%dT%H:%M:%SZ")  args: $*"
