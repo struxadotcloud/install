@@ -1127,9 +1127,18 @@ success "Images pulled"
 
 step "Starting Struxa..."
 start_spinner "Starting Struxa services..."
-docker compose -f docker-compose.prod.yml --env-file .env.prod up -d > /dev/null 2>&1 || {
-  stop_spinner; err "Failed to start Struxa services."; exit 1
-}
+UP_LOG=$(mktemp)
+if ! docker compose -f docker-compose.prod.yml --env-file .env.prod up -d > "$UP_LOG" 2>&1; then
+  stop_spinner
+  err "Failed to start Struxa services."
+  echo "---- docker compose up output ----" >&2
+  cat "$UP_LOG" >&2
+  echo "---- docker compose ps ----" >&2
+  docker compose -f docker-compose.prod.yml --env-file .env.prod ps >&2
+  rm -f "$UP_LOG"
+  exit 1
+fi
+rm -f "$UP_LOG"
 stop_spinner
 success "Struxa services started"
 
