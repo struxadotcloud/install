@@ -150,6 +150,17 @@ stop_spinner() {
   fi
 }
 
+# Runs "$@", capturing its output. On failure, dumps that output to stderr
+# (which the installer log also captures) so silent commands leave a trail.
+run_logged() {
+  local tmp rc=0
+  tmp=$(mktemp)
+  "$@" > "$tmp" 2>&1 || rc=$?
+  [[ $rc -ne 0 ]] && cat "$tmp" >&2
+  rm -f "$tmp"
+  return "$rc"
+}
+
 # Clean up spinner on exit
 trap 'stop_spinner' EXIT
 
@@ -527,7 +538,7 @@ MINIO_VARS
   step "Pulling Struxa images..."
   start_spinner "Pulling images (this may take a few minutes)..."
   cd "$STRUXA_DIR"
-  docker compose -f docker-compose.prod.yml --env-file .env.prod pull > /dev/null 2>&1 || {
+  run_logged docker compose -f docker-compose.prod.yml --env-file .env.prod pull || {
     stop_spinner; err "Failed to pull images. Check your network connection."
     send_event "installer_failed" "\"stage\":\"update_pull\""; exit 1
   }
@@ -536,7 +547,7 @@ MINIO_VARS
 
   step "Restarting Struxa services..."
   start_spinner "Restarting services..."
-  docker compose -f docker-compose.prod.yml --env-file .env.prod up -d > /dev/null 2>&1 || {
+  run_logged docker compose -f docker-compose.prod.yml --env-file .env.prod up -d || {
     stop_spinner; err "Failed to restart Struxa services."
     send_event "installer_failed" "\"stage\":\"update_restart\""; exit 1
   }
@@ -552,14 +563,14 @@ MINIO_VARS
       step "Pulling Wings images..."
       start_spinner "Pulling Wings images..."
       cd "$WINGS_DIR"
-      docker compose -f compose.yml pull > /dev/null 2>&1 || {
+      run_logged docker compose -f compose.yml pull || {
         stop_spinner; warn "Failed to pull Wings images — check manually."
       }
       stop_spinner
 
       step "Restarting Wings..."
       start_spinner "Restarting Wings..."
-      docker compose -f compose.yml up -d > /dev/null 2>&1 || {
+      run_logged docker compose -f compose.yml up -d || {
         stop_spinner; warn "Failed to restart Wings — check manually."
       }
       stop_spinner
@@ -581,6 +592,21 @@ MINIO_VARS
 
 STRUXA_DIR="/opt/struxa"
 WINGS_DIR="/opt/wings"
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+# Mirrors everything printed from here on into a log file for debugging.
+LOG_FILE="/var/log/struxa-install.log"
+mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || LOG_FILE="/tmp/struxa-install.log"
+{
+  echo "════════════════════════════════════════════════════════════"
+  echo "Struxa installer run: $(date -u +"%Y-%m-%dT%H:%M:%SZ")  args: $*"
+  echo "Host: $(hostname 2>/dev/null || echo unknown)"
+  uname -a
+  [[ -f /etc/os-release ]] && cat /etc/os-release
+  echo "════════════════════════════════════════════════════════════"
+} >> "$LOG_FILE" 2>&1
+chmod 600 "$LOG_FILE" 2>/dev/null || true
+exec > >(tee -a "$LOG_FILE") 2>&1
 
 show_banner
 send_event "installer_started" "\"action\":\"$MODE\",\"channel\":\"$([[ $USE_NIGHTLY == true ]] && echo nightly || echo stable)\""
@@ -1155,7 +1181,7 @@ header "Starting Services"
 step "Pulling Struxa images..."
 start_spinner "Pulling images (this may take a few minutes)..."
 cd "$STRUXA_DIR"
-docker compose -f docker-compose.prod.yml --env-file .env.prod pull > /dev/null 2>&1 || {
+run_logged docker compose -f docker-compose.prod.yml --env-file .env.prod pull || {
   stop_spinner; err "Failed to pull Struxa images. Check your network and image tag."
   send_event "installer_failed" "\"stage\":\"start_pull\""; exit 1
 }
@@ -1184,7 +1210,7 @@ if $INSTALL_WINGS; then
   step "Starting Wings..."
   start_spinner "Starting Wings..."
   cd "$WINGS_DIR"
-  docker compose -f compose.yml up -d > /dev/null 2>&1 || {
+  run_logged docker compose -f compose.yml up -d || {
     stop_spinner; warn "Failed to start Wings — check the config and token after panel setup."
   }
   stop_spinner
@@ -1227,8 +1253,9 @@ if $INSTALL_WINGS; then
 fi
 
 echo -e "  ${DIM}View logs:${RESET}"
-echo -e "  ${DIM}  Struxa:${RESET}  cd ${STRUXA_DIR} && docker compose -f docker-compose.prod.yml logs -f"
+echo -e "  ${DIM}  Struxa:${RESET}    cd ${STRUXA_DIR} && docker compose -f docker-compose.prod.yml logs -f"
 if $INSTALL_WINGS; then
-echo -e "  ${DIM}  Wings:${RESET}   cd ${WINGS_DIR} && docker compose logs -f"
+echo -e "  ${DIM}  Wings:${RESET}     cd ${WINGS_DIR} && docker compose logs -f"
 fi
+echo -e "  ${DIM}  Installer:${RESET} ${LOG_FILE}"
 blank
