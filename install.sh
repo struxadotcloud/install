@@ -191,7 +191,10 @@ CURRENT_STAGE="start"
 # PostHog never delays or breaks the install.
 send_event() {
   $NO_TELEMETRY && return 0
-  curl -fsSL --max-time 3 -X POST "$POSTHOG_HOST/capture/" \
+  # --retry: the very first event fires right after the banner, before any
+  # prereq checks, so on a freshly-booted VM DNS/networking may not be up
+  # yet. Retries absorb that without blocking the install (still backgrounded).
+  curl -fsSL --max-time 5 --retry 2 --retry-delay 2 --retry-connrefused -X POST "$POSTHOG_HOST/capture/" \
     -H "Content-Type: application/json" \
     -d "{\"api_key\":\"$POSTHOG_KEY\",\"event\":\"$1\",\"distinct_id\":\"$STRUXA_DISTINCT_ID\",\"properties\":{$2,\"\$ip\":null,\"os\":\"$(uname -s)\",\"arch\":\"$(uname -m)\"}}" \
     >/dev/null 2>&1 &
