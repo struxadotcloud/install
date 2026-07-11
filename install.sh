@@ -55,25 +55,27 @@ ask_yn() {
   local prompt="$1" default="${2:-y}" reply
   local hint; [[ "$default" == "y" ]] && hint="[Y/n]" || hint="[y/N]"
   while true; do
-    echo -en "${BOLD}  ? ${RESET}${prompt} ${DIM}${hint}${RESET} " >/dev/tty
+    echo -en "${BOLD}  ? ${RESET}${prompt} ${DIM}${hint}${RESET} " >&2
     read -r reply </dev/tty
     reply="${reply:-$default}"
     case "${reply,,}" in
       y|yes) return 0 ;;
       n|no)  return 1 ;;
-      *)     echo -e "${YELLOW}  ⚠${RESET} Please answer y or n." >/dev/tty ;;
+      *)     echo -e "${YELLOW}  ⚠${RESET} Please answer y or n." >&2 ;;
     esac
   done
 }
 
-# All display in ask_input/ask_secret/ask_select goes to /dev/tty so that
-# calling them inside $() command substitution doesn't swallow the prompts.
+# All display in ask_input/ask_secret/ask_select goes to stderr — not stdout,
+# so calling them inside $() command substitution doesn't swallow the
+# prompts; not /dev/tty either, so ordering stays correct relative to the
+# rest of the script's output once stdout/stderr are piped through a logger.
 ask_input() {
   local prompt="$1" default="${2:-}" result
   if [[ -n "$default" ]]; then
-    echo -en "${BOLD}  ? ${RESET}${prompt} ${DIM}[${default}]${RESET}: " >/dev/tty
+    echo -en "${BOLD}  ? ${RESET}${prompt} ${DIM}[${default}]${RESET}: " >&2
   else
-    echo -en "${BOLD}  ? ${RESET}${prompt}: " >/dev/tty
+    echo -en "${BOLD}  ? ${RESET}${prompt}: " >&2
   fi
   read -r result </dev/tty
   echo "${result:-$default}"
@@ -81,28 +83,28 @@ ask_input() {
 
 ask_secret() {
   local prompt="$1" result
-  echo -en "${BOLD}  ? ${RESET}${prompt} ${DIM}(hidden)${RESET}: " >/dev/tty
+  echo -en "${BOLD}  ? ${RESET}${prompt} ${DIM}(hidden)${RESET}: " >&2
   read -rs result </dev/tty
-  echo "" >/dev/tty
+  echo "" >&2
   echo "$result"
 }
 
 ask_select() {
   local prompt="$1"; shift
   local options=("$@") choice i=1
-  echo -e "${BOLD}  ? ${RESET}${prompt}" >/dev/tty
+  echo -e "${BOLD}  ? ${RESET}${prompt}" >&2
   for opt in "${options[@]}"; do
-    echo -e "     ${CYAN}[${i}]${RESET} ${opt}" >/dev/tty
+    echo -e "     ${CYAN}[${i}]${RESET} ${opt}" >&2
     (( i++ )) || true
   done
   while true; do
-    echo -en "  ${BOLD}→${RESET} Choice: " >/dev/tty
+    echo -en "  ${BOLD}→${RESET} Choice: " >&2
     read -r choice </dev/tty
     if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#options[@]} )); then
       echo "$choice"
       return
     fi
-    echo -e "${YELLOW}  ⚠${RESET} Enter a number between 1 and ${#options[@]}." >/dev/tty
+    echo -e "${YELLOW}  ⚠${RESET} Enter a number between 1 and ${#options[@]}." >&2
   done
 }
 
