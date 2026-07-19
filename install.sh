@@ -175,6 +175,7 @@ for arg in "$@"; do
     --nightly)      USE_NIGHTLY=true ;;
     --no-telemetry) NO_TELEMETRY=true ;;
     update)         MODE="update" ;;
+    uninstall|remove) MODE="uninstall" ;;
   esac
 done
 [[ -n "${DO_NOT_TRACK:-}" ]] && NO_TELEMETRY=true
@@ -591,6 +592,125 @@ MINIO_VARS
   exit 0
 }
 
+# ── Uninstall existing installation ──────────────────────────────────────────
+do_uninstall() {
+  header "Uninstall Struxa"
+
+  if [[ ! -f "${STRUXA_DIR}/.env.prod" ]]; then
+    err "No existing installation found at ${STRUXA_DIR}/.env.prod"
+    send_event "installer_failed" "\"stage\":\"uninstall_not_found\""
+    exit 1
+  fi
+
+  send_event "installer_uninstall_started" ""
+
+  local has_wings=false has_nginx=false has_apache=false has_caddy=false has_selfsigned=false
+  [[ -f "${WINGS_DIR}/compose.yml" ]] && has_wings=true
+  [[ -f /etc/nginx/sites-available/struxa-panel.conf ]] && has_nginx=true
+  [[ -f /etc/apache2/sites-available/struxa-panel.conf ]] && has_apache=true
+  grep -q "^# Struxa Panel — added by installer$" /etc/caddy/Caddyfile 2>/dev/null && has_caddy=true
+  [[ -d /etc/ssl/struxa ]] && has_selfsigned=true
+
+  blank
+  info "This will stop and remove:"
+  echo -e "     ${DIM}- Struxa dashboard containers${RESET}"
+  $has_wings && echo -e "     ${DIM}- Wings node agent containers${RESET}"
+  $has_nginx && echo -e "     ${DIM}- nginx site configs for Struxa${RESET}"
+  $has_apache && echo -e "     ${DIM}- Apache site config for Struxa${RESET}"
+  $has_caddy && echo -e "     ${DIM}- Caddy blocks for Struxa${RESET}"
+  $has_selfsigned && echo -e "     ${DIM}- self-signed certs at /etc/ssl/struxa${RESET}"
+  blank
+  warn "This cannot be undone."
+  blank
+
+  if ! ask_yn "Proceed with uninstall?" "n"; then
+    info "Uninstall cancelled."
+    exit 0
+  fi
+
+  local delete_volumes="false"
+  ask_yn "Also delete Struxa data volumes (database, uploads)? This cannot be undone." "n" && delete_volumes="true"
+
+  blank
+
+  if $has_wings; then
+    step "Stopping Wings..."
+    start_spinner "Stopping Wings containers..."
+    cd "$WINGS_DIR"
+    if $delete_volumes; then
+      run_logged docker compose -f compose.yml down -v || warn "Failed to stop Wings — check manually."
+    else
+      run_logged docker compose -f compose.yml down || warn "Failed to stop Wings — check manually."
+    fi
+    stop_spinner
+    success "Wings stopped"
+  fi
+
+  step "Stopping Struxa..."
+  start_spinner "Stopping Struxa containers..."
+  cd "$STRUXA_DIR"
+  if $delete_volumes; then
+    run_logged docker compose -f docker-compose.prod.yml --env-file .env.prod down -v || warn "Failed to stop Struxa — check manually."
+  else
+    run_logged docker compose -f docker-compose.prod.yml --env-file .env.prod down || warn "Failed to stop Struxa — check manually."
+  fi
+  stop_spinner
+  success "Struxa stopped"
+
+  if $has_nginx; then
+    step "Removing nginx configuration..."
+    rm -f /etc/nginx/sites-available/struxa-panel.conf /etc/nginx/sites-available/struxa-wings.conf
+    rm -f /etc/nginx/sites-enabled/struxa-panel.conf /etc/nginx/sites-enabled/struxa-wings.conf
+    nginx -t 2>/dev/null && systemctl reload nginx
+    success "nginx configuration removed"
+  fi
+
+  if $has_apache; then
+    step "Removing Apache configuration..."
+    a2dissite struxa-panel 2>/dev/null || true
+    rm -f /etc/apache2/sites-available/struxa-panel.conf
+    apache2ctl configtest 2>/dev/null && systemctl reload apache2
+    success "Apache configuration removed"
+  fi
+
+  if $has_caddy; then
+    step "Removing Caddy configuration..."
+    local caddyfile="/etc/caddy/Caddyfile" tmp
+    cp "$caddyfile" "${caddyfile}.bak.$(date +%s)"
+    tmp=$(mktemp)
+    awk '
+      /^# Struxa (Panel|Wings) — added by installer$/ { skip=1 }
+      skip { if ($0 == "}") skip=0; next }
+      { print }
+    ' "$caddyfile" > "$tmp"
+    mv "$tmp" "$caddyfile"
+    systemctl reload caddy 2>/dev/null || true
+    success "Caddy configuration removed"
+  fi
+
+  $has_selfsigned && { rm -rf /etc/ssl/struxa; success "Self-signed certs removed"; }
+
+  if compgen -G "/etc/letsencrypt/live/*/fullchain.pem" >/dev/null 2>&1; then
+    info "Let's Encrypt certificates were not removed — run 'certbot delete --cert-name <domain>' manually if desired."
+  fi
+
+  $has_wings && rm -f /etc/pterodactyl/config.yml
+
+  blank
+  if ask_yn "Delete ${STRUXA_DIR}$($has_wings && echo " and ${WINGS_DIR}"), including .env.prod and all secrets?" "y"; then
+    rm -rf "$STRUXA_DIR"
+    $has_wings && rm -rf "$WINGS_DIR"
+    success "Installation directories removed"
+  fi
+
+  blank
+  success "Uninstall complete"
+  send_event "installer_uninstall_completed" ""
+  echo -e "  ${DIM}Installer log:${RESET} ${LOG_FILE}"
+  blank
+  exit 0
+}
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -625,6 +745,7 @@ show_banner
 send_event "installer_started" "\"action\":\"$MODE\",\"channel\":\"$([[ $USE_NIGHTLY == true ]] && echo nightly || echo stable)\""
 require_root
 check_prereqs
+[[ "$MODE" == "uninstall" ]] && do_uninstall
 resolve_release_tag
 
 [[ "$MODE" == "update" ]] && do_update
