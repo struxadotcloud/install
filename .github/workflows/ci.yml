@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Syntax check
+        run: bash -n install.sh provisioning/provision.sh tests/run.sh tests/unit.sh scripts/run-tests.sh
+
+      - name: Shellcheck
+        run: shellcheck -S warning install.sh provisioning/provision.sh tests/run.sh tests/unit.sh scripts/run-tests.sh

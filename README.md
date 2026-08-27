@@ -25,6 +25,7 @@ The installer sets up a full Struxa deployment on a fresh Linux server in a sing
 - Detecting your running webserver (nginx / Apache / Caddy) and configuring a reverse proxy
 - Installing nginx from scratch if no webserver is present
 - Obtaining **SSL certificates** via Let's Encrypt (certbot) or generating a self-signed cert
+- Creating your **admin account** and **linking Wings to the panel automatically** — no onboarding wizard, no manual token copy
 
 ## Related repositories
 
@@ -56,16 +57,45 @@ The script is interactive — it will walk you through every step.
 
 ## After installation
 
-Once the installer completes, Wings will be running but **not yet connected** to the panel — it needs a token from the panel to authenticate.
+The installer prompts for an admin email and password and creates the account itself — just sign in at your panel URL. If you installed Wings, the node is created and linked automatically (Wings sits behind your reverse proxy on port 443); no manual token copy is needed. The panel's in-browser setup wizard remains available for manual installations.
 
-1. Log in to your panel and go to **Admin → Nodes → Create New Node**
-2. Fill in the node details, then open the **Configuration** tab
-3. Copy `token_id` and `token` into `/etc/pterodactyl/config.yml`
-4. Restart Wings:
+## Updating
 
-   ```bash
-   cd /opt/wings && docker compose restart
-   ```
+```bash
+bash <(curl -fsSL https://install.struxa.cloud) update
+```
+
+The updater compares versions and skips components that are already up to date (no more "1.4.0 → 1.4.0" re-pulls). Panel and Wings updates are independent prompts — cancelling one does not cancel the other. Use `--panel-only` or `--wings-only` to update a single component.
+
+## Unattended installs
+
+Set `STRUXA_UNATTENDED=1` and provide the answers as environment variables (useful for CI, Ansible, or Vagrant):
+
+| Variable | Default | Description |
+|---|---|---|
+| `STRUXA_MODE` | `wings` | `dashboard` or `wings` |
+| `STRUXA_PANEL_DOMAIN` | — | Panel domain (required) |
+| `STRUXA_WINGS_DOMAIN` | — | Wings domain (required with wings) |
+| `STRUXA_EMAIL` | — | Admin email (required) |
+| `STRUXA_PASSWORD` | — | Admin password, min 8 chars (required) |
+| `STRUXA_ADMIN_NAME` | email prefix | Admin display name |
+| `STRUXA_LOCATION_NAME` | `Default` | Location name |
+| `STRUXA_NODE_NAME` | wings domain | Node name |
+| `STRUXA_WEBSERVER` | `nginx` | `nginx`, `apache`, `caddy`, or `none` |
+| `STRUXA_SSL` | `selfsigned` | `letsencrypt`, `selfsigned`, or `none` |
+| `STRUXA_LETSENCRYPT_EMAIL` | — | Required with `letsencrypt` |
+| `STRUXA_IMAGE_TAG` | latest release | Pin a specific panel release |
+| `STRUXA_NODE_MEMORY` / `STRUXA_NODE_DISK` | `4096` / `50000` | Node resources in MB |
+
+```bash
+STRUXA_UNATTENDED=1 \
+STRUXA_MODE=wings \
+STRUXA_PANEL_DOMAIN=panel.example.com \
+STRUXA_WINGS_DOMAIN=node.example.com \
+STRUXA_EMAIL=admin@example.com \
+STRUXA_PASSWORD='your-secure-password' \
+bash <(curl -fsSL https://install.struxa.cloud)
+```
 
 ## Requirements
 

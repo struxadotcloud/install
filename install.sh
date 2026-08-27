@@ -3,7 +3,13 @@
 
 # Redirect stdin from the terminal so interactive prompts work when the script
 # is fetched via curl (curl | bash pipes stdin; bash <(curl) does not).
-exec < /dev/tty
+# Skipped when there is no terminal at all (e.g. vagrant provision) — the
+# unattended mode never reads from /dev/tty anyway.
+if [[ ! -t 0 ]] && [[ -e /dev/tty ]]; then
+  exec < /dev/tty
+fi
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd || true)"
 
 # ── Colors ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -45,7 +51,7 @@ BANNER
 require_root() {
   if [[ $EUID -ne 0 ]]; then
     err "This script must be run as root. Try: sudo bash install.sh"
-    send_event "installer_failed" "\"stage\":\"root_check\""
+    fail_event "root_check"
     exit 1
   fi
 }
@@ -54,6 +60,10 @@ require_root() {
 ask_yn() {
   local prompt="$1" default="${2:-y}" reply
   local hint; [[ "$default" == "y" ]] && hint="[Y/n]" || hint="[y/N]"
+  if [[ "${STRUXA_UNATTENDED:-}" == "1" ]]; then
+    echo -e "${BOLD}  ? ${RESET}${prompt} ${DIM}${hint}${RESET} ${DIM}(unattended)${RESET}" >&2
+    [[ "$default" == "y" ]] && return 0 || return 1
+  fi
   while true; do
     echo -en "${BOLD}  ? ${RESET}${prompt} ${DIM}${hint}${RESET} " >&2
     read -r reply </dev/tty
@@ -72,6 +82,11 @@ ask_yn() {
 # rest of the script's output once stdout/stderr are piped through a logger.
 ask_input() {
   local prompt="$1" default="${2:-}" result
+  if [[ "${STRUXA_UNATTENDED:-}" == "1" ]]; then
+    err "ask_input (${prompt}) reached in unattended mode — missing STRUXA_* variable?"
+    fail_event "unattended_prompt"
+    exit 1
+  fi
   if [[ -n "$default" ]]; then
     echo -en "${BOLD}  ? ${RESET}${prompt} ${DIM}[${default}]${RESET}: " >&2
   else
@@ -83,6 +98,11 @@ ask_input() {
 
 ask_secret() {
   local prompt="$1" result
+  if [[ "${STRUXA_UNATTENDED:-}" == "1" ]]; then
+    err "ask_secret (${prompt}) reached in unattended mode — missing STRUXA_* variable?"
+    fail_event "unattended_prompt"
+    exit 1
+  fi
   echo -en "${BOLD}  ? ${RESET}${prompt} ${DIM}(hidden)${RESET}: " >&2
   read -rs result </dev/tty
   echo "" >&2
@@ -92,6 +112,11 @@ ask_secret() {
 ask_select() {
   local prompt="$1"; shift
   local options=("$@") choice i=1
+  if [[ "${STRUXA_UNATTENDED:-}" == "1" ]]; then
+    err "ask_select (${prompt}) reached in unattended mode — missing STRUXA_* variable?"
+    fail_event "unattended_prompt"
+    exit 1
+  fi
   echo -e "${BOLD}  ? ${RESET}${prompt}" >&2
   for opt in "${options[@]}"; do
     echo -e "     ${CYAN}[${i}]${RESET} ${opt}" >&2
@@ -170,24 +195,83 @@ trap 'stop_spinner' EXIT
 USE_NIGHTLY=false
 MODE="install"
 NO_TELEMETRY=false
+PANEL_ONLY=false
+WINGS_ONLY=false
 for arg in "$@"; do
   case "$arg" in
     --nightly)      USE_NIGHTLY=true ;;
     --no-telemetry) NO_TELEMETRY=true ;;
+    --panel-only)   PANEL_ONLY=true ;;
+    --wings-only)   WINGS_ONLY=true ;;
     update)         MODE="update" ;;
     uninstall|remove) MODE="uninstall" ;;
   esac
 done
 [[ -n "${DO_NOT_TRACK:-}" ]] && NO_TELEMETRY=true
 [[ -n "${STRUXA_NO_TELEMETRY:-}" ]] && NO_TELEMETRY=true
+if $PANEL_ONLY && $WINGS_ONLY; then
+  err "--panel-only and --wings-only are mutually exclusive."
+  exit 1
+fi
 
 # ── Telemetry ─────────────────────────────────────────────────────────────────
 # Anonymous install analytics (event name + OS/arch/mode, no domains or secrets).
 # Opt out with --no-telemetry, STRUXA_NO_TELEMETRY=1, or DO_NOT_TRACK=1.
-STRUXA_DISTINCT_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
 POSTHOG_HOST="https://eu.i.posthog.com"
 POSTHOG_KEY="phc_wJVWqWPQjfae28vTDvyoU4rxm5HcrQVxzsSkooL6REsM"
-CURRENT_STAGE="start"
+
+# Persistent anonymous install id so events from the same machine correlate.
+# Falls back to a per-run uuid when /opt/struxa is not writable (non-root).
+STRUXA_DISTINCT_ID=""
+ensure_install_id() {
+  if [[ -f /opt/struxa/.install_id ]]; then
+    STRUXA_DISTINCT_ID=$(cat /opt/struxa/.install_id)
+    return
+  fi
+  local new_id
+  new_id=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
+  if [[ $EUID -eq 0 ]] && mkdir -p /opt/struxa 2>/dev/null; then
+    echo "$new_id" > /opt/struxa/.install_id
+    chmod 600 /opt/struxa/.install_id 2>/dev/null || true
+  fi
+  STRUXA_DISTINCT_ID="$new_id"
+}
+ensure_install_id
+
+distro_id() {
+  if [[ -f /etc/os-release ]]; then
+    local id ver pretty
+    id=$(sed -n 's/^ID=//p' /etc/os-release | head -1 | tr -d '"')
+    ver=$(sed -n 's/^VERSION_ID=//p' /etc/os-release | head -1 | tr -d '"')
+    if [[ -n "$id" ]]; then
+      echo "${id}${ver:+_${ver}}"
+      return
+    fi
+    pretty=$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release | head -1 | tr -d '"')
+    if [[ -n "$pretty" ]]; then
+      echo "$pretty"
+      return
+    fi
+  fi
+  echo "unknown"
+}
+
+json_escape() {
+  sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e ':a;N;$!ba;s/\n/\\n/g' -e 's/\r//g' -e 's/\t/\\t/g'
+}
+
+# Replaces every known secret value in stdin with [REDACTED]. Used before
+# sending log tails in telemetry; the on-disk log itself is untouched.
+scrub_secrets() {
+  local script_file var val
+  script_file=$(mktemp)
+  for var in MYSQL_ROOT_PASSWORD MYSQL_PASSWORD BETTER_AUTH_SECRET DATABASE_ENCRYPTION_KEY MINIO_ACCESS_KEY MINIO_SECRET_KEY TURNSTILE_SECRET_KEY BOOTSTRAP_SECRET ADMIN_PASSWORD ADMIN_EMAIL JWT_PRIVATE_KEY JWT_PUBLIC_KEY; do
+    val="${!var}"
+    [[ -n "$val" ]] && printf 's/%s/[REDACTED]/g\n' "$(printf '%s' "$val" | sed 's/[][\/&|]/\\&/g')" >> "$script_file"
+  done
+  sed -f "$script_file"
+  rm -f "$script_file"
+}
 
 # $1 = event name, $2 = extra JSON properties, e.g. '"mode":"install"'
 # Fire-and-forget: backgrounded with a short timeout so a slow/unreachable
@@ -199,8 +283,43 @@ send_event() {
   # yet. Retries absorb that without blocking the install (still backgrounded).
   curl -fsSL --max-time 5 --retry 2 --retry-delay 2 --retry-connrefused -X POST "$POSTHOG_HOST/capture/" \
     -H "Content-Type: application/json" \
-    -d "{\"api_key\":\"$POSTHOG_KEY\",\"event\":\"$1\",\"distinct_id\":\"$STRUXA_DISTINCT_ID\",\"properties\":{$2,\"\$ip\":null,\"os\":\"$(uname -s)\",\"arch\":\"$(uname -m)\"}}" \
+    -d "{\"api_key\":\"$POSTHOG_KEY\",\"event\":\"$1\",\"distinct_id\":\"$STRUXA_DISTINCT_ID\",\"properties\":{$2,\"\$ip\":null,\"os\":\"$(uname -s)\",\"arch\":\"$(uname -m)\",\"distro\":\"$(distro_id)\"}}" \
     >/dev/null 2>&1 &
+}
+
+# Failure events carry a scrubbed tail of the installer log, not just a stage tag.
+fail_event() {
+  local stage="$1" error=""
+  if [[ -n "${LOG_FILE:-}" && -f "$LOG_FILE" ]]; then
+    error=$(tail -n 30 "$LOG_FILE" | scrub_secrets | json_escape | cut -c1-2000)
+  fi
+  send_event "installer_failed" "\"stage\":\"${stage}\",\"error\":\"${error}\""
+}
+
+# ── Unattended mode validation ───────────────────────────────────────────────
+validate_unattended() {
+  [[ "${STRUXA_UNATTENDED:-}" == "1" ]] || return 0
+  [[ "$MODE" != "install" ]] && return 0
+  local problems=()
+  [[ -n "${STRUXA_PANEL_DOMAIN:-}" ]] || problems+=("STRUXA_PANEL_DOMAIN")
+  [[ -n "${STRUXA_EMAIL:-}" ]] || problems+=("STRUXA_EMAIL")
+  [[ ${#STRUXA_PASSWORD:-} -ge 8 ]] || problems+=("STRUXA_PASSWORD (min 8 chars)")
+  [[ "${STRUXA_EMAIL:-}" =~ ^[^@[:space:]]+@[^@[:space:]]+$ ]] || problems+=("STRUXA_EMAIL (valid email)")
+  case "${STRUXA_MODE:-wings}" in dashboard|wings) ;; *) problems+=("STRUXA_MODE (dashboard|wings)") ;; esac
+  case "${STRUXA_WEBSERVER:-nginx}" in nginx|apache|caddy|none) ;; *) problems+=("STRUXA_WEBSERVER (nginx|apache|caddy|none)") ;; esac
+  case "${STRUXA_SSL:-selfsigned}" in letsencrypt|selfsigned|none) ;; *) problems+=("STRUXA_SSL (letsencrypt|selfsigned|none)") ;; esac
+  [[ "${STRUXA_SSL:-selfsigned}" == "letsencrypt" && -z "${STRUXA_LETSENCRYPT_EMAIL:-}" ]] && problems+=("STRUXA_LETSENCRYPT_EMAIL (required with letsencrypt)")
+  [[ "${STRUXA_MODE:-wings}" == "wings" && -z "${STRUXA_WINGS_DOMAIN:-}" ]] && problems+=("STRUXA_WINGS_DOMAIN (required with wings mode)")
+  [[ "${STRUXA_NODE_MEMORY:-4096}" =~ ^[0-9]+$ ]] || problems+=("STRUXA_NODE_MEMORY (number)")
+  [[ "${STRUXA_NODE_DISK:-50000}" =~ ^[0-9]+$ ]] || problems+=("STRUXA_NODE_DISK (number)")
+  if [[ "${STRUXA_WEBSERVER:-nginx}" == "apache" || "${STRUXA_WEBSERVER:-nginx}" == "caddy" ]]; then
+    [[ "$(detect_webserver)" == "${STRUXA_WEBSERVER}" ]] || problems+=("STRUXA_WEBSERVER=${STRUXA_WEBSERVER} requires a running ${STRUXA_WEBSERVER}")
+  fi
+  if [[ ${#problems[@]} -gt 0 ]]; then
+    err "Unattended mode: missing or invalid environment: ${problems[*]}"
+    fail_event "validation"
+    exit 1
+  fi
 }
 
 # ── Prerequisites ────────────────────────────────────────────────────────────
@@ -221,7 +340,7 @@ check_prereqs() {
         success "Docker installed"
       else
         err "Docker installation failed. Install it manually and re-run."
-        send_event "installer_failed" "\"stage\":\"prereqs_docker\""
+        fail_event "prereqs_docker"
         exit 1
       fi
     else
@@ -257,7 +376,7 @@ check_prereqs() {
     blank
     err "Missing: ${missing[*]}"
     err "Install them and re-run this script."
-    send_event "installer_failed" "\"stage\":\"prereqs_missing\""
+    fail_event "prereqs_missing"
     exit 1
   fi
 
@@ -460,6 +579,13 @@ RESOLVED_IMAGE_TAG=""
 resolve_release_tag() {
   local api_base="https://api.github.com/repos/struxadotcloud/struxa"
 
+  if [[ -n "${STRUXA_IMAGE_TAG:-}" ]]; then
+    RESOLVED_TAG="v${STRUXA_IMAGE_TAG}"
+    RESOLVED_IMAGE_TAG="${STRUXA_IMAGE_TAG}"
+    success "Release pinned via STRUXA_IMAGE_TAG: ${BOLD}${RESOLVED_TAG}${RESET}  (image tag: ${RESOLVED_IMAGE_TAG})"
+    return
+  fi
+
   if $USE_NIGHTLY; then
     step "Fetching latest pre-release tag from GitHub..."
     RESOLVED_TAG=$(curl -fsSL "${api_base}/releases?per_page=20" \
@@ -482,7 +608,7 @@ resolve_release_tag() {
 
   if [[ -z "$RESOLVED_TAG" ]]; then
     err "Could not resolve a release tag from GitHub. Check your network connection."
-    send_event "installer_failed" "\"stage\":\"release_tag\""
+    fail_event "release_tag"
     exit 1
   fi
 
@@ -490,82 +616,101 @@ resolve_release_tag() {
 }
 
 # ── Update existing installation ─────────────────────────────────────────────
+ver_compare() {
+  printf '%s\n%s\n' "${1#v}" "${2#v}" | sort -V | head -1
+}
+
 do_update() {
   header "Update Struxa"
-  send_event "installer_update_started" "\"channel\":\"$([[ $USE_NIGHTLY == true ]] && echo nightly || echo stable)\""
 
   if [[ ! -f "${STRUXA_DIR}/.env.prod" ]]; then
     err "No existing installation found at ${STRUXA_DIR}/.env.prod"
     err "Run the installer without the update option first."
-    send_event "installer_failed" "\"stage\":\"update_not_found\""
+    fail_event "update_not_found"
     exit 1
   fi
 
-  local current_tag
+  local current_tag channel="stable" panel_updated=false wings_updated=false updated="none"
   current_tag=$(grep '^IMAGE_TAG=' "${STRUXA_DIR}/.env.prod" | cut -d= -f2)
+  { [[ "$current_tag" == "nightly" ]] || $USE_NIGHTLY; } && channel="nightly"
 
-  blank
-  info "Current image tag : ${BOLD}${current_tag}${RESET}"
-  info "Will update to    : ${BOLD}${RESOLVED_IMAGE_TAG}${RESET}  (release: ${RESOLVED_TAG})"
-  blank
-  warn "This will pull new images and restart all Struxa services."
-  blank
+  send_event "installer_update_started" "\"channel\":\"${channel}\",\"panel_version\":\"${RESOLVED_TAG}\""
 
-  if ! ask_yn "Proceed with update?" "y"; then
-    info "Update cancelled."
-    exit 0
-  fi
+  if ! $WINGS_ONLY; then
+    header "Update Panel"
+    blank
+    info "Current image tag : ${BOLD}${current_tag}${RESET}"
+    info "Will update to    : ${BOLD}${RESOLVED_IMAGE_TAG}${RESET}  (release: ${RESOLVED_TAG})"
+    blank
 
-  blank
-  step "Setting IMAGE_TAG=${RESOLVED_IMAGE_TAG}..."
-  sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=${RESOLVED_IMAGE_TAG}/" "${STRUXA_DIR}/.env.prod"
-  success "IMAGE_TAG → ${RESOLVED_IMAGE_TAG}"
+    if [[ "$channel" == "stable" && -n "$current_tag" && "${current_tag#v}" == "${RESOLVED_IMAGE_TAG#v}" ]]; then
+      success "Panel is already up to date (${RESOLVED_IMAGE_TAG})."
+    elif [[ "$channel" == "stable" && -n "$current_tag" && "$(ver_compare "$current_tag" "$RESOLVED_IMAGE_TAG")" == "${RESOLVED_IMAGE_TAG#v}" ]]; then
+      warn "Current version (${current_tag}) is newer than ${RESOLVED_TAG} — skipping panel update."
+    else
+      warn "This will pull new images and restart all Struxa services."
+      blank
+      if ! ask_yn "Proceed with panel update?" "y"; then
+        info "Panel update cancelled."
+      else
+        blank
+        step "Setting IMAGE_TAG=${RESOLVED_IMAGE_TAG}..."
+        sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=${RESOLVED_IMAGE_TAG}/" "${STRUXA_DIR}/.env.prod"
+        success "IMAGE_TAG → ${RESOLVED_IMAGE_TAG}"
 
-  step "Checking for new required variables..."
-  if ! grep -q '^MINIO_ACCESS_KEY=' "${STRUXA_DIR}/.env.prod"; then
-    warn "MinIO variables not found in .env.prod — generating and appending them now."
-    local new_minio_access new_minio_secret
-    new_minio_access=$(generate_secret)
-    new_minio_secret=$(generate_secret)
-    cat >> "${STRUXA_DIR}/.env.prod" << MINIO_VARS
+        step "Checking for new required variables..."
+        if ! grep -q '^MINIO_ACCESS_KEY=' "${STRUXA_DIR}/.env.prod"; then
+          warn "MinIO variables not found in .env.prod — generating and appending them now."
+          local new_minio_access new_minio_secret
+          new_minio_access=$(generate_secret)
+          new_minio_secret=$(generate_secret)
+          cat >> "${STRUXA_DIR}/.env.prod" << MINIO_VARS
 
 MINIO_ENDPOINT=http://minio:9000
 MINIO_ACCESS_KEY=${new_minio_access}
 MINIO_SECRET_KEY=${new_minio_secret}
 MINIO_BUCKET=struxa
 MINIO_VARS
-    success "MinIO variables appended to .env.prod"
+          success "MinIO variables appended to .env.prod"
+        fi
+
+        step "Fetching docker-compose.prod.yml from ${RESOLVED_TAG}..."
+        curl -fsSL "https://raw.githubusercontent.com/struxadotcloud/struxa/refs/tags/${RESOLVED_TAG}/docker-compose.prod.yml" \
+          -o "${STRUXA_DIR}/docker-compose.prod.yml" || warn "Failed to fetch compose file — using existing."
+
+        step "Pulling Struxa images..."
+        start_spinner "Pulling images (this may take a few minutes)..."
+        cd "$STRUXA_DIR"
+        run_logged docker compose -f docker-compose.prod.yml --env-file .env.prod pull || {
+          stop_spinner; err "Failed to pull images. Check your network connection."
+          fail_event "update_pull"; exit 1
+        }
+        stop_spinner
+        success "Images pulled"
+
+        step "Restarting Struxa services..."
+        start_spinner "Restarting services..."
+        run_logged docker compose -f docker-compose.prod.yml --env-file .env.prod up -d || {
+          stop_spinner; err "Failed to restart Struxa services."
+          fail_event "update_restart"; exit 1
+        }
+        stop_spinner
+        success "Struxa services updated and restarted"
+        panel_updated=true
+      fi
+    fi
   fi
 
-  step "Fetching docker-compose.prod.yml from ${RESOLVED_TAG}..."
-  curl -fsSL "https://raw.githubusercontent.com/struxadotcloud/struxa/refs/tags/${RESOLVED_TAG}/docker-compose.prod.yml" \
-    -o "${STRUXA_DIR}/docker-compose.prod.yml" || warn "Failed to fetch compose file — using existing."
-
-  step "Pulling Struxa images..."
-  start_spinner "Pulling images (this may take a few minutes)..."
-  cd "$STRUXA_DIR"
-  run_logged docker compose -f docker-compose.prod.yml --env-file .env.prod pull || {
-    stop_spinner; err "Failed to pull images. Check your network connection."
-    send_event "installer_failed" "\"stage\":\"update_pull\""; exit 1
-  }
-  stop_spinner
-  success "Images pulled"
-
-  step "Restarting Struxa services..."
-  start_spinner "Restarting services..."
-  run_logged docker compose -f docker-compose.prod.yml --env-file .env.prod up -d || {
-    stop_spinner; err "Failed to restart Struxa services."
-    send_event "installer_failed" "\"stage\":\"update_restart\""; exit 1
-  }
-  stop_spinner
-  success "Struxa services updated and restarted"
-
-  if [[ -f "${WINGS_DIR}/compose.yml" ]]; then
+  if ! $PANEL_ONLY && [[ -f "${WINGS_DIR}/compose.yml" ]]; then
     header "Update Wings"
     blank
     warn "This will pull new Wings images and restart the Wings node agent."
     blank
     if ask_yn "Proceed with Wings update?" "y"; then
+      step "Fetching wings compose.yml..."
+      curl -fsSL "https://raw.githubusercontent.com/struxadotcloud/wings/master/compose.yml" \
+        -o "${WINGS_DIR}/compose.yml" || warn "Failed to fetch Wings compose file — using existing."
+
       step "Pulling Wings images..."
       start_spinner "Pulling Wings images..."
       cd "$WINGS_DIR"
@@ -581,14 +726,20 @@ MINIO_VARS
       }
       stop_spinner
       success "Wings updated and restarted"
+      wings_updated=true
     else
       info "Wings update skipped."
     fi
   fi
 
+  if $panel_updated && $wings_updated; then updated="both"
+  elif $panel_updated; then updated="panel"
+  elif $wings_updated; then updated="wings"
+  fi
+
   blank
-  success "Update complete"
-  send_event "installer_update_completed" ""
+  success "Update complete (updated: ${updated})"
+  send_event "installer_update_completed" "\"panel_version\":\"${RESOLVED_TAG}\",\"channel\":\"${channel}\",\"updated\":\"${updated}\""
   exit 0
 }
 
@@ -598,7 +749,7 @@ do_uninstall() {
 
   if [[ ! -f "${STRUXA_DIR}/.env.prod" ]]; then
     err "No existing installation found at ${STRUXA_DIR}/.env.prod"
-    send_event "installer_failed" "\"stage\":\"uninstall_not_found\""
+    fail_event "uninstall_not_found"
     exit 1
   fi
 
@@ -711,6 +862,62 @@ do_uninstall() {
   exit 0
 }
 
+# ── Admin account bootstrap ──────────────────────────────────────────────────
+BOOTSTRAP_OK=false
+BOOTSTRAP_RESPONSE=""
+WINGS_LINKED=false
+
+setup_panel_admin() {
+  header "Setting Up Admin Account"
+  step "Waiting for panel to become ready..."
+  local attempts=0
+  while [[ "$(curl -sk -o /dev/null -w '%{http_code}' https://127.0.0.1:3001/ 2>/dev/null)" != "200" ]]; do
+    attempts=$((attempts + 1))
+    if [[ $attempts -ge 36 ]]; then
+      err "Panel did not become ready within 3 minutes."
+      fail_event "panel_timeout"
+      exit 1
+    fi
+    sleep 5
+  done
+  success "Panel is up"
+
+  local wings_json=""
+  if $INSTALL_WINGS; then
+    local wings_daemon_listen=443
+    [[ "$URL_SCHEME" == "http" ]] && wings_daemon_listen=80
+    wings_json=",\"wings\":{\"fqdn\":\"$(printf '%s' "$WINGS_DOMAIN" | json_escape)\",\"nodeName\":\"$(printf '%s' "$NODE_NAME" | json_escape)\",\"scheme\":\"${URL_SCHEME}\",\"daemonListen\":${wings_daemon_listen},\"memory\":${NODE_MEMORY},\"disk\":${NODE_DISK}}"
+  fi
+
+  step "Creating admin account${INSTALL_WINGS:+ and linking node}..."
+  local body status
+  body="{\"email\":\"$(printf '%s' "$ADMIN_EMAIL" | json_escape)\",\"password\":\"$(printf '%s' "$ADMIN_PASSWORD" | json_escape)\",\"name\":\"$(printf '%s' "$ADMIN_NAME" | json_escape)\",\"locationName\":\"$(printf '%s' "$LOCATION_NAME" | json_escape)\"${wings_json}}"
+  BOOTSTRAP_RESPONSE=$(curl -sk -X POST "https://127.0.0.1:3001/api/setup/bootstrap" \
+    -H "Content-Type: application/json" \
+    -H "x-bootstrap-secret: ${BOOTSTRAP_SECRET}" \
+    --data "$body" -w $'\n%{http_code}')
+  status=$(echo "$BOOTSTRAP_RESPONSE" | tail -1)
+  BOOTSTRAP_RESPONSE=$(echo "$BOOTSTRAP_RESPONSE" | sed '$d')
+
+  case "$status" in
+    200)
+      BOOTSTRAP_OK=true
+      success "Admin account created"
+      ;;
+    409)
+      warn "Panel reports setup was already handled — continuing."
+      ;;
+    404)
+      warn "Panel version does not support automatic setup — continuing with manual setup."
+      ;;
+    *)
+      err "Admin setup failed (HTTP ${status}): ${BOOTSTRAP_RESPONSE}"
+      fail_event "bootstrap"
+      exit 1
+      ;;
+  esac
+}
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -744,17 +951,24 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 show_banner
 send_event "installer_started" "\"action\":\"$MODE\",\"channel\":\"$([[ $USE_NIGHTLY == true ]] && echo nightly || echo stable)\""
 require_root
+validate_unattended
 check_prereqs
 [[ "$MODE" == "uninstall" ]] && do_uninstall
-resolve_release_tag
+if [[ "$MODE" != "update" ]] || ! $WINGS_ONLY; then
+  resolve_release_tag
+fi
 
 [[ "$MODE" == "update" ]] && do_update
 
 # ── Installation mode ────────────────────────────────────────────────────────
 header "Installation Mode"
-INSTALL_MODE=$(ask_select "What would you like to install?" \
-  "Dashboard only  (Struxa panel + database)" \
-  "Dashboard + Wings  (panel, database and node agent)")
+if [[ "$STRUXA_UNATTENDED" == "1" ]]; then
+  [[ "${STRUXA_MODE:-wings}" == "dashboard" ]] && INSTALL_MODE="1" || INSTALL_MODE="2"
+else
+  INSTALL_MODE=$(ask_select "What would you like to install?" \
+    "Dashboard only  (Struxa panel + database)" \
+    "Dashboard + Wings  (panel, database and node agent)")
+fi
 
 INSTALL_WINGS=false
 [[ "$INSTALL_MODE" == "2" ]] && INSTALL_WINGS=true
@@ -769,7 +983,7 @@ step "Fetching docker-compose.prod.yml (${RESOLVED_TAG})..."
 curl -fsSL "https://raw.githubusercontent.com/struxadotcloud/struxa/refs/tags/${RESOLVED_TAG}/docker-compose.prod.yml" \
   -o "${STRUXA_DIR}/docker-compose.prod.yml" || {
   err "Failed to download Struxa compose file."
-  send_event "installer_failed" "\"stage\":\"download_struxa_compose\""
+  fail_event "download_struxa_compose"
   exit 1
 }
 success "Struxa compose file ready"
@@ -782,7 +996,7 @@ if $INSTALL_WINGS; then
   curl -fsSL "https://raw.githubusercontent.com/struxadotcloud/wings/master/compose.yml" \
     -o "${WINGS_DIR}/compose.yml" || {
     err "Failed to download Wings compose file."
-    send_event "installer_failed" "\"stage\":\"download_wings_compose\""
+    fail_event "download_wings_compose"
     exit 1
   }
   success "Wings compose file ready"
@@ -791,7 +1005,33 @@ fi
 # ── Dashboard configuration ──────────────────────────────────────────────────
 header "Dashboard Configuration"
 
-PANEL_DOMAIN=$(ask_input "Panel domain" "panel.example.com")
+if [[ "$STRUXA_UNATTENDED" == "1" ]]; then
+  PANEL_DOMAIN="${STRUXA_PANEL_DOMAIN}"
+  ADMIN_EMAIL="${STRUXA_EMAIL}"
+  ADMIN_PASSWORD="${STRUXA_PASSWORD}"
+  ADMIN_NAME="${STRUXA_ADMIN_NAME:-${STRUXA_EMAIL%%@*}}"
+else
+  PANEL_DOMAIN=$(ask_input "Panel domain" "panel.example.com")
+
+  blank
+  step "Admin account"
+  while true; do
+    ADMIN_EMAIL=$(ask_input "Admin email")
+    [[ "$ADMIN_EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+$ ]] && break
+    warn "Please enter a valid email address."
+  done
+  while true; do
+    ADMIN_PASSWORD=$(ask_secret "Admin password (min 8 characters)")
+    if [[ ${#ADMIN_PASSWORD} -lt 8 ]]; then
+      warn "Password must be at least 8 characters."
+      continue
+    fi
+    ADMIN_PASSWORD_CONFIRM=$(ask_secret "Confirm admin password")
+    [[ "$ADMIN_PASSWORD" == "$ADMIN_PASSWORD_CONFIRM" ]] && break
+    warn "Passwords do not match — try again."
+  done
+  ADMIN_NAME=$(ask_input "Admin display name" "${ADMIN_EMAIL%%@*}")
+fi
 
 blank
 step "Generating secure credentials..."
@@ -804,6 +1044,7 @@ BETTER_AUTH_SECRET=$(generate_secret)
 DATABASE_ENCRYPTION_KEY=$(generate_hex64)
 MINIO_ACCESS_KEY=$(generate_secret)
 MINIO_SECRET_KEY=$(generate_secret)
+BOOTSTRAP_SECRET=$(generate_secret)
 
 step "Generating RSA key pair for JWT signing..."
 generate_rsa_keypair
@@ -826,13 +1067,24 @@ WINGS_DOMAIN=""
 WINGS_TIMEZONE="UTC"
 WINGS_UID="988"
 WINGS_GID="988"
+LOCATION_NAME="Default"
+NODE_NAME=""
+NODE_MEMORY="4096"
+NODE_DISK="50000"
 
 if $INSTALL_WINGS; then
   header "Wings Configuration"
-  WINGS_DOMAIN=$(ask_input "Wings node domain or IP" "node.example.com")
-  WINGS_TIMEZONE=$(ask_input "Timezone (Europe/Warsaw)" "UTC")
-  WINGS_UID=$(ask_input "Wings user UID" "988")
-  WINGS_GID=$(ask_input "Wings user GID" "988")
+  if [[ "$STRUXA_UNATTENDED" == "1" ]]; then
+    WINGS_DOMAIN="${STRUXA_WINGS_DOMAIN}"
+    LOCATION_NAME="${STRUXA_LOCATION_NAME:-Default}"
+    NODE_NAME="${STRUXA_NODE_NAME:-${WINGS_DOMAIN}}"
+    NODE_MEMORY="${STRUXA_NODE_MEMORY:-4096}"
+    NODE_DISK="${STRUXA_NODE_DISK:-50000}"
+  else
+    WINGS_DOMAIN=$(ask_input "Wings node domain or IP" "node.example.com")
+    LOCATION_NAME=$(ask_input "Location name" "Default")
+    NODE_NAME=$(ask_input "Node name" "${WINGS_DOMAIN}")
+  fi
   success "Wings configuration ready"
 fi
 
@@ -845,7 +1097,16 @@ SSL_MODE="none"
 SSL_EMAIL=""
 WEBSERVER="none"
 
-if [[ "$DETECTED_WS" != "none" ]]; then
+if [[ "$STRUXA_UNATTENDED" == "1" ]]; then
+  WEBSERVER="${STRUXA_WEBSERVER:-nginx}"
+  SSL_MODE="${STRUXA_SSL:-selfsigned}"
+  SSL_EMAIL="${STRUXA_LETSENCRYPT_EMAIL:-}"
+  case "$WEBSERVER" in
+    none) WS_ACTION="skip" ;;
+    nginx) [[ "$DETECTED_WS" == "nginx" ]] && WS_ACTION="configure" || WS_ACTION="install_nginx" ;;
+    apache|caddy) WS_ACTION="configure" ;;
+  esac
+elif [[ "$DETECTED_WS" != "none" ]]; then
   info "Detected: ${BOLD}${DETECTED_WS}${RESET}"
   blank
   WS_CHOICE=$(ask_select "How would you like to handle the webserver?" \
@@ -869,7 +1130,7 @@ else
   esac
 fi
 
-if [[ "$WS_ACTION" != "skip" ]]; then
+if [[ "$STRUXA_UNATTENDED" != "1" && "$WS_ACTION" != "skip" ]]; then
   blank
   SSL_CHOICE=$(ask_select "SSL / HTTPS configuration:" \
     "Let's Encrypt (certbot)  — domain must point to this server" \
@@ -921,6 +1182,7 @@ JWT_PUBLIC_KEY=${JWT_PUBLIC_KEY}
 DATABASE_ENCRYPTION_KEY=${DATABASE_ENCRYPTION_KEY}
 
 TURNSTILE_SECRET_KEY=${TURNSTILE_SECRET_KEY}
+BOOTSTRAP_SECRET=${BOOTSTRAP_SECRET}
 
 MINIO_ENDPOINT=http://minio:9000
 MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
@@ -1317,7 +1579,7 @@ start_spinner "Pulling images (this may take a few minutes)..."
 cd "$STRUXA_DIR"
 run_logged docker compose -f docker-compose.prod.yml --env-file .env.prod pull || {
   stop_spinner; err "Failed to pull Struxa images. Check your network and image tag."
-  send_event "installer_failed" "\"stage\":\"start_pull\""; exit 1
+  fail_event "start_pull"; exit 1
 }
 stop_spinner
 success "Images pulled"
@@ -1333,14 +1595,31 @@ if ! docker compose -f docker-compose.prod.yml --env-file .env.prod up -d > "$UP
   echo "---- docker compose ps ----" >&2
   docker compose -f docker-compose.prod.yml --env-file .env.prod ps >&2
   rm -f "$UP_LOG"
-  send_event "installer_failed" "\"stage\":\"start_up\""
+  fail_event "start_up"
   exit 1
 fi
 rm -f "$UP_LOG"
 stop_spinner
 success "Struxa services started"
 
+setup_panel_admin
+
 if $INSTALL_WINGS; then
+  if $BOOTSTRAP_OK; then
+    step "Writing linked wings config..."
+    WINGS_CONFIG_YAML=$(echo "$BOOTSTRAP_RESPONSE" | sed -n 's/.*"configYaml":"\([^"]*\)".*/\1/p' | sed 's/\\n/\n/g')
+    if [[ -n "$WINGS_CONFIG_YAML" ]]; then
+      printf '%s\n' "$WINGS_CONFIG_YAML" > "${WINGS_DIR}/config/config.yml"
+      mkdir -p /etc/pterodactyl
+      cp "${WINGS_DIR}/config/config.yml" /etc/pterodactyl/config.yml
+      chmod 600 /etc/pterodactyl/config.yml
+      WINGS_LINKED=true
+      success "wings config.yml written with live token"
+    else
+      warn "Could not extract wings config from bootstrap response — using placeholder config."
+    fi
+  fi
+
   step "Starting Wings..."
   start_spinner "Starting Wings..."
   cd "$WINGS_DIR"
@@ -1348,12 +1627,16 @@ if $INSTALL_WINGS; then
     stop_spinner; warn "Failed to start Wings — check the config and token after panel setup."
   }
   stop_spinner
-  success "Wings started (may need token before it connects)"
+  if $WINGS_LINKED; then
+    success "Wings started and linked to the panel"
+  else
+    success "Wings started (may need token before it connects)"
+  fi
 fi
 
-cd "$SCRIPT_DIR"
+cd "${SCRIPT_DIR:-/tmp}" 2>/dev/null || true
 
-send_event "installer_completed" "\"mode\":\"$([[ $INSTALL_WINGS == true ]] && echo dashboard_wings || echo dashboard_only)\",\"webserver\":\"$WEBSERVER\",\"ssl\":\"$SSL_MODE\""
+send_event "installer_completed" "\"mode\":\"$([[ $INSTALL_WINGS == true ]] && echo dashboard_wings || echo dashboard_only)\",\"webserver\":\"$WEBSERVER\",\"ssl\":\"$SSL_MODE\",\"panel_version\":\"${RESOLVED_TAG}\""
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 blank
@@ -1374,17 +1657,23 @@ echo   "  ╚══════════════════════�
 echo -e "${RESET}"
 
 if $INSTALL_WINGS; then
-  echo -e "${YELLOW}${BOLD}  ⚠  Wings needs a token before it can connect to the panel!${RESET}"
-  blank
-  echo -e "  ${BOLD}Complete Wings setup:${RESET}"
-  echo -e "  ${DIM}1.${RESET} Open ${PANEL_URL} and log in"
-  echo -e "  ${DIM}2.${RESET} Go to  Admin → Nodes → Create New Node"
-  echo -e "  ${DIM}3.${RESET} Fill in the node details and open the  Configuration  tab"
-  echo -e "  ${DIM}4.${RESET} Copy  token_id  and  token  into  /etc/pterodactyl/config.yml"
-  echo -e "  ${DIM}5.${RESET} Restart wings:"
-  echo -e "        cd ${WINGS_DIR} && docker compose restart"
-  blank
+  if $WINGS_LINKED; then
+    echo -e "${GREEN}${BOLD}  ✓  Wings node linked to the panel automatically${RESET}"
+  else
+    echo -e "${YELLOW}${BOLD}  ⚠  Wings needs a token before it can connect to the panel!${RESET}"
+    blank
+    echo -e "  ${BOLD}Complete Wings setup:${RESET}"
+    echo -e "  ${DIM}1.${RESET} Open ${PANEL_URL} and log in"
+    echo -e "  ${DIM}2.${RESET} Go to  Admin → Nodes → Create New Node"
+    echo -e "  ${DIM}3.${RESET} Fill in the node details and open the  Configuration  tab"
+    echo -e "  ${DIM}4.${RESET} Copy  token_id  and  token  into  /etc/pterodactyl/config.yml"
+    echo -e "  ${DIM}5.${RESET} Restart wings:"
+    echo -e "        cd ${WINGS_DIR} && docker compose restart"
+    blank
+  fi
 fi
+
+echo -e "  ${BOLD}Sign in:${RESET} ${ADMIN_EMAIL}"
 
 echo -e "  ${DIM}View logs:${RESET}"
 echo -e "  ${DIM}  Struxa:${RESET}    cd ${STRUXA_DIR} && docker compose -f docker-compose.prod.yml logs -f"
