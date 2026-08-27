@@ -871,7 +871,7 @@ setup_panel_admin() {
   header "Setting Up Admin Account"
   step "Waiting for panel to become ready..."
   local attempts=0
-  while [[ "$(curl -sk -o /dev/null -w '%{http_code}' http://127.0.0.1:3001/ 2>/dev/null)" != "200" ]]; do
+  while [[ "$(curl -sk -o /dev/null -w '%{http_code}' http://127.0.0.1:3001/ 2>/dev/null)" == "000" ]]; do
     attempts=$((attempts + 1))
     if [[ $attempts -ge 36 ]]; then
       err "Panel did not become ready within 3 minutes."
