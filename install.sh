@@ -871,7 +871,7 @@ setup_panel_admin() {
   header "Setting Up Admin Account"
   step "Waiting for panel to become ready..."
   local attempts=0
-  while [[ "$(curl -sk -o /dev/null -w '%{http_code}' https://127.0.0.1:3001/ 2>/dev/null)" != "200" ]]; do
+  while [[ "$(curl -sk -o /dev/null -w '%{http_code}' http://127.0.0.1:3001/ 2>/dev/null)" != "200" ]]; do
     attempts=$((attempts + 1))
     if [[ $attempts -ge 36 ]]; then
       err "Panel did not become ready within 3 minutes."
@@ -892,7 +892,7 @@ setup_panel_admin() {
   step "Creating admin account${INSTALL_WINGS:+ and linking node}..."
   local body status
   body="{\"email\":\"$(printf '%s' "$ADMIN_EMAIL" | json_escape)\",\"password\":\"$(printf '%s' "$ADMIN_PASSWORD" | json_escape)\",\"name\":\"$(printf '%s' "$ADMIN_NAME" | json_escape)\",\"locationName\":\"$(printf '%s' "$LOCATION_NAME" | json_escape)\"${wings_json}}"
-  BOOTSTRAP_RESPONSE=$(curl -sk -X POST "https://127.0.0.1:3001/api/setup/bootstrap" \
+  BOOTSTRAP_RESPONSE=$(curl -sk -X POST "http://127.0.0.1:3001/api/setup/bootstrap" \
     -H "Content-Type: application/json" \
     -H "x-bootstrap-secret: ${BOOTSTRAP_SECRET}" \
     --data "$body" -w $'\n%{http_code}')
