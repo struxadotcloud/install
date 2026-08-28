@@ -708,7 +708,7 @@ MINIO_VARS
     blank
     if ask_yn "Proceed with Wings update?" "y"; then
       step "Fetching wings compose.yml..."
-      curl -fsSL "https://raw.githubusercontent.com/struxadotcloud/wings/master/compose.yml" \
+      curl -fsSL "https://raw.githubusercontent.com/struxadotcloud/wings/main/compose.yml" \
         -o "${WINGS_DIR}/compose.yml" || warn "Failed to fetch Wings compose file — using existing."
 
       step "Pulling Wings images..."
@@ -993,7 +993,7 @@ if $INSTALL_WINGS; then
   mkdir -p "${WINGS_DIR}/config"
 
   step "Fetching wings compose.yml..."
-  curl -fsSL "https://raw.githubusercontent.com/struxadotcloud/wings/master/compose.yml" \
+  curl -fsSL "https://raw.githubusercontent.com/struxadotcloud/wings/main/compose.yml" \
     -o "${WINGS_DIR}/compose.yml" || {
     err "Failed to download Wings compose file."
     fail_event "download_wings_compose"
