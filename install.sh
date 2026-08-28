@@ -591,11 +591,8 @@ resolve_release_tag() {
     RESOLVED_TAG=$(curl -fsSL "${api_base}/releases?per_page=20" \
       -H "Accept: application/vnd.github+json" | \
       awk '
-        /"tag_name"/ { tag = $0 }
-        /"prerelease": true/ {
-          match(tag, /"tag_name": *"([^"]+)"/, a)
-          if (a[1]) { print a[1]; exit }
-        }
+        /"tag_name"/ { tag = $0; sub(/^.*"tag_name": *"/, "", tag); sub(/".*$/, "", tag) }
+        /"prerelease": *true/ && !found { print tag; found = 1 }
       ')
     RESOLVED_IMAGE_TAG="nightly"
   else
